@@ -1,10 +1,10 @@
-name: Repack verified Generals X 1.0.5.11 draft
+name: Repack verified Generals X 1.0.5.12 draft
 
 on:
   workflow_dispatch:
     inputs:
       release_id:
-        description: Existing v1.0.5.11 draft release ID
+        description: Existing v1.0.5.12 draft release ID
         required: true
         type: string
       input_asset_id:
@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: generalsx-repack-v1.0.5.11
+  group: generalsx-repack-v1.0.5.12
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +33,14 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Ensure build-only XZ compressor
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          if ! command -v xz >/dev/null 2>&1; then
+            brew install xz
+          fi
+          xz --version
       - name: Reconstruct, verify, package, and upload to draft only
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -41,7 +49,7 @@ jobs:
           INPUT_SHA256: ${{ inputs.input_sha256 }}
         run: |
           python3 ci/repack_release.py \
-            --work "$RUNNER_TEMP/generalsx-repack-1.0.5.11" \
+            --work "$RUNNER_TEMP/generalsx-repack-1.0.5.12" \
             --release-id "$RELEASE_ID" \
             --input-asset-id "$INPUT_ASSET_ID" \
             --input-sha256 "$INPUT_SHA256"

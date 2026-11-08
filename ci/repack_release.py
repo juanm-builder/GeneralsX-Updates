@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Repack the exact already-signed .11 app from verified .7 plus a pinned patch.
+"""Repack the exact already-signed .12 app from verified .11 plus a pinned patch.
 
 Never signs, creates/deletes releases, replaces assets, or publishes. The only
-remote writes are explicit uploads of verified output files to existing draft11.
+remote writes are explicit uploads of verified output files to the target draft.
 Uses release_uploader.py's streaming client, not its CLI or credential helper.
 """
 import argparse
@@ -19,20 +19,13 @@ import subprocess
 import tarfile
 from urllib.parse import urlsplit
 
-from release_uploader import API, REPO, VERSION, TAG, PARTS, SOURCE, IMAGE, CHUNK, GitHub, ReleaseError, require
+from release_uploader import CHUNK, GitHub, ReleaseError, require
+from release_config import (CONFIG, API, REPO, VERSION, TAG, SOURCE, IMAGE, MANUAL,
+                            PATCH, INPUT, REPORT, EXPECTED_CDHASH, EXPECTED_ENTRIES,
+                            PATCH_COUNT, BASE, BASE_CDHASH, BASE_IMAGE_HASH,
+                            BASE_PARTS, BASE_TAG, PART_SIZE, ASSET_LIMIT, part_name)
 
 APP = "Generals X Launcher.app"
-PATCH = f"GeneralsX-{VERSION}-app-patch.tar.gz"
-INPUT = f"GeneralsX-{VERSION}-ci-input.tar.gz"
-REPORT = f"GeneralsX-{VERSION}-ci-validation.json"
-EXPECTED_CDHASH = "11cf64c018721b4b9ad0b4c8f555fdddb40ba543"
-BASE_CDHASH = "a28bf643b5de26ffe50c9acbb05f04d9400cb93e"
-BASE_IMAGE_HASH = "adf8b6411912ff27959372676a9a62d0642094e9c5d5779f313df60654d13e56"
-BASE_PARTS = [
-    ("GeneralsX-1.0.5.7-macos-arm64.dmg.part01", 1073741824, "f0f76ce776db1756b1935616baa1195fb1b6b78a44224d461e7d522b485e7255"),
-    ("GeneralsX-1.0.5.7-macos-arm64.dmg.part02", 1073741824, "b51b4b00bdfe8e778bdd5ec4c8a9fe1a126c7b1f6a220b75e6f3237ac0520aa5"),
-    ("GeneralsX-1.0.5.7-macos-arm64.dmg.part03", 458564193, "65e6f1975428c79a2d590b2edc38323807470d350623e9b7ae53dc9314ff6d5d"),
-]
 OUTER_NAMES = {PATCH, "baseline-update.json", "expected-tree.json", "patch-files.json", "source-info.json", "update-template.json", "volume-files.json", "volume-files/.DS_Store", "volume-files/Read Me.txt", "volume-files/Nemesis testing.txt"}
 VOLUME_NAMES = {".DS_Store", "Read Me.txt", "Nemesis testing.txt"}
 
@@ -80,6 +73,17 @@ def tree(app):
     return sorted(entries, key=lambda x: x["path"])
 
 
+def hardlink_groups(app):
+    groups = {}
+    for directory, _, files in os.walk(app, followlinks=False):
+        for name in files:
+            path = Path(directory) / name
+            details = path.lstat()
+            if stat.S_ISREG(details.st_mode) and details.st_nlink > 1:
+                groups.setdefault((details.st_dev, details.st_ino), []).append(path.relative_to(app).as_posix())
+    return sorted(sorted(paths) for paths in groups.values() if len(paths) > 1)
+
+
 def compare_tree(app, expected):
     actual = tree(app)
     wanted = sorted(expected["entries"], key=lambda x: x["path"])
@@ -88,6 +92,7 @@ def compare_tree(app, expected):
         left, right = {e["path"]: e for e in actual}, {e["path"]: e for e in wanted}
         differences = [name for name in sorted(set(left) | set(right)) if left.get(name) != right.get(name)]
         raise ReleaseError("App tree differs (content/type/mode/symlink): " + ", ".join(differences[:12]))
+    require(hardlink_groups(app) == expected["hardlinks"], "App hardlink topology differs from the signed stage")
     return len(actual)
 
 
@@ -114,19 +119,20 @@ def extract_input(archive, destination, expected_sha):
 
 def apply_patch(app, inputs):
     expected = read_json(inputs / "expected-tree.json")
-    require(expected.get("appCDHash") == EXPECTED_CDHASH, "Expected app identity mismatch")
+    require(expected.get("appCDHash") == EXPECTED_CDHASH and len(expected["entries"]) == EXPECTED_ENTRIES, "Expected app identity/tree count mismatch")
     entries = {e["path"]: e for e in expected["entries"]}
     paths = read_json(inputs / "patch-files.json")
-    require(len(paths) == 13 and len(set(paths)) == 13, "Exactly 13 unique replacements are required")
+    require(len(paths) == PATCH_COUNT and len(set(paths)) == PATCH_COUNT, "Pinned number of unique replacements is required")
     with tarfile.open(inputs / PATCH, "r:gz") as archive:
         members = archive.getmembers()
-        require(len(members) == 13 and {m.name for m in members} == set(paths), "Patch archive members do not match declared replacements")
+        require(len(members) == PATCH_COUNT and {m.name for m in members} == set(paths), "Patch archive members do not match declared replacements")
         for member in members:
             relative = safe_relative(member.name)
             wanted = entries.get(member.name, {})
             require(member.isfile() and wanted.get("type") == "file" and member.size == wanted.get("size"), "Patch member type/size mismatch")
             target = app / relative
             require(target.is_file() and not target.is_symlink(), "Patch replacement must already be a regular file")
+            require(target.stat().st_nlink == 1, "Patch replacement cannot write through a hardlinked file")
             parent = target.parent
             while parent != app:
                 require(not parent.is_symlink(), "Patch parent cannot be a symlink")
@@ -214,7 +220,7 @@ def download(api, asset, stream, expected_size, expected_sha):
 
 def draft(api, release_id):
     release = api.json("GET", f"{API}/releases/{release_id}")
-    require(release.get("tag_name") == TAG and release.get("draft") is True and not release.get("prerelease"), "Target must remain the existing non-prerelease .11 draft")
+    require(release.get("tag_name") == TAG and release.get("draft") is True and not release.get("prerelease"), "Target must remain the existing release draft")
     return release
 
 
@@ -229,38 +235,105 @@ def check_asset(asset, size, digest):
     require(asset.get("state") == "uploaded" and asset.get("size") == size and asset.get("digest") == "sha256:" + digest, "Remote asset size/state/SHA256 mismatch")
 
 
-def split_and_manifest(image, inputs, output):
+def create_manual(volume, image, work):
+    if CONFIG["manualInstaller"] == "none":
+        return None
+    if CONFIG["manualFormat"] == "dmg":
+        archive = image
+    else:
+        archive = work / MANUAL
+        environment = os.environ.copy()
+        environment.pop("COPYFILE_DISABLE", None)
+        compressor = shutil.which("xz")
+        require(compressor is not None, "The build runner needs xz for manual archive compression")
+        # xz is a build-only tool. Recipients extract with macOS's native tar/liblzma.
+        producer = subprocess.Popen(["/usr/bin/tar", "-cf", "-", "--", APP, "Read Me.txt"], cwd=volume, env=environment, stdout=subprocess.PIPE)
+        consumer = None
+        try:
+            with archive.open("xb") as output:
+                consumer = subprocess.Popen([compressor, "-T3", "-9", "--stdout"], stdin=producer.stdout, stdout=output, env=environment)
+                producer.stdout.close()
+                compression_status = consumer.wait()
+                tar_status = producer.wait()
+            require(compression_status == 0 and tar_status == 0, "Manual archive producer failed")
+        finally:
+            for process in (consumer, producer):
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait()
+    if archive.stat().st_size >= ASSET_LIMIT:
+        require(CONFIG["manualInstaller"] != "required", "Manual installer exceeds GitHub asset limit; no outputs uploaded")
+        if archive != image:
+            archive.unlink()
+        return None
+    return archive
+
+
+def verify_manual(archive, work, inputs, expected):
+    if archive is None:
+        return None
+    if CONFIG["manualFormat"] == "tar.xz":
+        extraction = work / "manual-extracted"
+        extraction.mkdir()
+        environment = os.environ.copy()
+        environment.pop("COPYFILE_DISABLE", None)
+        subprocess.run(["/usr/bin/tar", "-xJpf", str(archive), "-C", str(extraction)], env=environment, check=True)
+        require({p.name for p in extraction.iterdir()} == {APP, "Read Me.txt"}, "Manual archive has unexpected top-level contents")
+        count = compare_tree(extraction / APP, expected)
+        verify_codesign(extraction / APP, EXPECTED_CDHASH)
+        readme = next(e for e in read_json(inputs / "volume-files.json")["entries"] if e["path"] == "Read Me.txt")
+        path = extraction / "Read Me.txt"
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == readme["size"] and stat.S_IMODE(path.stat().st_mode) == readme["mode"] and sha(path) == readme["sha256"], "Manual Read Me differs")
+        shutil.rmtree(extraction)
+    else:
+        # The very same DMG already passed read-only mounted tree/signature checks.
+        count = EXPECTED_ENTRIES
+    return {"name": MANUAL, "format": CONFIG["manualFormat"], "size": archive.stat().st_size, "sha256": sha(archive), "treeEntriesVerified": count, "hardlinkGroupsVerified": len(expected["hardlinks"]), "strictDeepCodeSignatureVerified": True, "appCDHash": EXPECTED_CDHASH}
+
+
+def split_and_manifest(image, inputs, output, manual_path=None, manual=None):
     output.mkdir()
     parts, image_hash = [], hashlib.sha256()
+    part_count = (image.stat().st_size + PART_SIZE - 1) // PART_SIZE
+    require(1 <= part_count <= 8, "Unexpected image size/part count")
     with image.open("rb") as source:
-        for name in PARTS:
+        for index in range(1, part_count + 1):
+            name = part_name(index)
             size, digest = 0, hashlib.sha256()
             with (output / name).open("xb") as target:
-                while size < 1024 ** 3:
-                    block = source.read(min(CHUNK, 1024 ** 3 - size))
+                while size < PART_SIZE:
+                    block = source.read(min(CHUNK, PART_SIZE - size))
                     if not block:
                         break
                     target.write(block)
                     size += len(block)
                     digest.update(block)
                     image_hash.update(block)
-            require(size > 0, "Expected exactly three nonempty image parts")
+            require(size > 0, "Expected nonempty image part")
             parts.append({"name": name, "size": size, "sha256": digest.hexdigest()})
-        require(source.read(1) == b"", "Image unexpectedly exceeds three parts")
+        require(source.read(1) == b"", "Image changed while splitting")
     template = read_json(inputs / "update-template.json")
-    require(template.get("version") == VERSION and template.get("appCDHash") == EXPECTED_CDHASH and template.get("sequence") == 2026110605, "Update metadata identity mismatch")
+    require(template.get("version") == VERSION and template.get("appCDHash") == EXPECTED_CDHASH and template.get("sequence") == CONFIG["sequence"] and template.get("bundleVersion") == CONFIG["bundleVersion"], "Update metadata identity mismatch")
     template.update(parts=parts, imageSize=image.stat().st_size, imageSHA256=image_hash.hexdigest())
     write_json(output / "suite-update.json", template)
     source_info = read_json(inputs / "source-info.json")
     require(source_info["name"] == SOURCE, "Source archive identity mismatch")
     (output / "SHA256SUMS.txt").write_text("".join(f"{p['sha256']}  {p['name']}\n" for p in parts) + f"{template['imageSHA256']}  {IMAGE}\n{source_info['sha256']}  {SOURCE}\n")
+    if manual is not None:
+        require(manual_path is not None and manual["size"] < ASSET_LIMIT, "Invalid verified manual archive")
+        os.link(manual_path, output / MANUAL)
+        if MANUAL != IMAGE:
+            with (output / "SHA256SUMS.txt").open("a") as checksums:
+                checksums.write(f"{manual['sha256']}  {MANUAL}\n")
     return template
 
 
-def upload_outputs(api, release_id, output):
-    allowed = set(PARTS) | {"suite-update.json", "SHA256SUMS.txt", REPORT}
+def upload_outputs(api, release_id, output, manifest):
+    part_names = [p["name"] for p in manifest["parts"]]
+    names = part_names + ([MANUAL] if (output / MANUAL).exists() else []) + ["suite-update.json", "SHA256SUMS.txt", REPORT]
+    allowed = set(names)
     require({p.name for p in output.iterdir()} == allowed, "Unexpected generated upload files")
-    for name in PARTS + ["suite-update.json", "SHA256SUMS.txt", REPORT]:
+    for name in names:
         release = draft(api, release_id)
         existing = asset_map(api, release)
         path = output / name
@@ -275,7 +348,7 @@ def upload_outputs(api, release_id, output):
     final = asset_map(api, draft(api, release_id))
     for name in allowed:
         check_asset(final[name], (output / name).stat().st_size, sha(output / name))
-    print("PASS: six verified output assets uploaded; release remains DRAFT; manifest remains UNSIGNED", flush=True)
+    print(f"PASS: {len(names)} verified output assets uploaded; release remains DRAFT; manifest remains UNSIGNED", flush=True)
 
 
 def remote_run(args):
@@ -291,7 +364,7 @@ def remote_run(args):
     check_asset(input_asset, input_asset["size"], args.input_sha256)
     require(0 < input_asset["size"] < 256 * 1024 * 1024, "Unexpected CI input size")
     # A rerun must never replace a previous run's nondeterministic DMG bytes.
-    require(not (set(PARTS) | {"suite-update.json", "SHA256SUMS.txt", "suite-update.json.sig", REPORT}) & set(assets), "Draft already contains image/metadata outputs; manual review/cleanup required before repacking")
+    require(set(assets) == {INPUT, SOURCE}, "Draft must contain only the verified input and source; existing outputs require manual review")
     args.work.mkdir()
     archive = args.work / INPUT
     with archive.open("xb") as stream:
@@ -301,8 +374,8 @@ def remote_run(args):
     source_info = read_json(inputs / "source-info.json")
     require(source_info["name"] == SOURCE and SOURCE in assets, "Expected source archive must already be uploaded")
     check_asset(assets[SOURCE], source_info["size"], source_info["sha256"])
-    baseline = api.json("GET", API + "/releases/tags/v1.0.5.7")
-    require(baseline.get("draft") is False and baseline.get("tag_name") == "v1.0.5.7", "Expected public .7 baseline")
+    baseline = api.json("GET", API + "/releases/tags/" + BASE_TAG)
+    require(baseline.get("draft") is False and baseline.get("tag_name") == BASE_TAG, "Expected pinned public baseline")
     base_assets = asset_map(api, baseline)
     image = args.work / "baseline.dmg"
     with image.open("xb") as stream:
@@ -321,10 +394,13 @@ def remote_run(args):
     archive.unlink()
     (inputs / PATCH).unlink()
     expanded = sum(e.get("size", 0) for e in expected["entries"] if e["type"] == "file")
-    needed = expanded + 2606055232 + 512 * 1024 * 1024
+    needed = expanded + BASE["imageSize"] + 512 * 1024 * 1024
     require(shutil.disk_usage(args.work).free >= needed, "Insufficient free disk for safe image creation")
     image = args.work / IMAGE
-    subprocess.run(["/usr/bin/hdiutil", "create", "-fs", "HFS+", "-volname", "Generals X Installer", "-srcfolder", str(volume), "-format", "UDZO", "-imagekey", "zlib-level=6", str(image)], check=True)
+    create = ["/usr/bin/hdiutil", "create", "-fs", "HFS+", "-volname", "Generals X Installer", "-srcfolder", str(volume), "-format", CONFIG["dmgFormat"]]
+    if CONFIG["dmgFormat"] == "UDZO":
+        create += ["-imagekey", "zlib-level=6"]
+    subprocess.run(create + [str(image)], check=True)
     subprocess.run(["/usr/bin/hdiutil", "verify", str(image)], check=True)
     new_mount = args.work / "new-image-mount"
     attach(image, new_mount)
@@ -332,12 +408,14 @@ def remote_run(args):
         mounted_count = verify_volume(new_mount, inputs, expected)
     finally:
         detach(new_mount)
+    manual_path = create_manual(volume, image, args.work)
     shutil.rmtree(volume)
+    manual = verify_manual(manual_path, args.work, inputs, expected)
     output = args.work / "output"
-    manifest = split_and_manifest(image, inputs, output)
-    report = {"schema": 1, "repository": REPO, "tag": TAG, "releaseId": args.release_id, "inputArchiveSHA256": args.input_sha256, "baselineImageSHA256": BASE_IMAGE_HASH, "appCDHash": EXPECTED_CDHASH, "expectedTreeSHA256": sha(inputs / "expected-tree.json"), "treeEntriesVerified": count, "mountedTreeEntriesVerified": mounted_count, "exactContentTypesModesSymlinks": True, "strictDeepCodeSignatureVerified": True, "imageSHA256": manifest["imageSHA256"], "imageSize": manifest["imageSize"], "manifestSHA256": sha(output / "suite-update.json"), "workflowCommit": os.environ.get("GITHUB_SHA"), "workflowRunId": os.environ.get("GITHUB_RUN_ID"), "privateSigningKeyUsed": False, "manifestSigned": False, "published": False}
+    manifest = split_and_manifest(image, inputs, output, manual_path, manual)
+    report = {"schema": 1, "repository": REPO, "tag": TAG, "releaseId": args.release_id, "inputArchiveSHA256": args.input_sha256, "baselineImageSHA256": BASE_IMAGE_HASH, "appCDHash": EXPECTED_CDHASH, "expectedTreeSHA256": sha(inputs / "expected-tree.json"), "treeEntriesVerified": count, "mountedTreeEntriesVerified": mounted_count, "hardlinkGroupsVerified": len(expected["hardlinks"]), "exactContentTypesModesSymlinks": True, "strictDeepCodeSignatureVerified": True, "imageSHA256": manifest["imageSHA256"], "imageSize": manifest["imageSize"], "manifestSHA256": sha(output / "suite-update.json"), "workflowCommit": os.environ.get("GITHUB_SHA"), "workflowRunId": os.environ.get("GITHUB_RUN_ID"), "privateSigningKeyUsed": False, "manifestSigned": False, "published": False, "dmgFormat": CONFIG["dmgFormat"], "manualInstallerAvailable": manual is not None, "manualInstaller": manual, "releaseConfigSHA256": sha(Path(__file__).with_name("release-config.json"))}
     write_json(output / REPORT, report)
-    upload_outputs(api, args.release_id, output)
+    upload_outputs(api, args.release_id, output, manifest)
     print(json.dumps(report, indent=2), flush=True)
 
 
@@ -356,7 +434,7 @@ def main():
         require(args.input_directory and args.baseline_app, "Local reconstruction needs both paths")
         args.work.mkdir()
         expected, count = make_volume(args.baseline_app.resolve(), args.input_directory.resolve(), args.work / "volume")
-        result = {"passed": True, "remoteRequests": 0, "treeEntries": count, "replacedFiles": 13, "appCDHash": expected["appCDHash"], "contentTypesModesSymlinksVerified": True, "strictDeepCodeSignatureVerified": True}
+        result = {"passed": True, "remoteRequests": 0, "treeEntries": count, "hardlinkGroups": len(expected["hardlinks"]), "replacedFiles": PATCH_COUNT, "appCDHash": expected["appCDHash"], "contentTypesModesSymlinksVerified": True, "strictDeepCodeSignatureVerified": True}
         write_json(args.work / "local-validation.json", result)
         print(json.dumps(result, indent=2))
     else:
