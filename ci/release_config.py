@@ -6,7 +6,7 @@ import re
 CONFIG = json.loads(Path(__file__).with_name("release-config.json").read_text())
 REPO = CONFIG["repository"]
 VERSION = CONFIG["version"]
-if REPO != "juanm-builder/GeneralsX-Updates" or VERSION != "1.0.5.12":
+if REPO != "juanm-builder/GeneralsX-Updates" or VERSION != "1.0.6.1":
     raise ValueError("Release configuration is outside this reviewed release scope")
 if re.fullmatch(r"[0-9a-f]{40}", CONFIG["expectedAppCDHash"]) is None:
     raise ValueError("Pin the staged app CDHash before using release helpers")
