@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-from github_release_store import API, REPO, GitHub, credential, require, stamp
+from github_release_store import API, REPO, GitHub, credential, require, stamp, upload_verified, incomplete_asset
 from prepare_file_update import sha, signing_tool, validate_files, valid_tag, scan
 
 
@@ -120,8 +120,9 @@ def run(api, value, required, objects, metadata, object_release_id, app_release_
     require(app_release.get('draft') is True, 'The app release must remain an unpublished draft')
     require(object_release.get('draft') is True or object_release.get('prerelease') is True, 'Object release must be draft or a completed content prerelease')
     current = asset_map(api, object_release)
-    expected_names = {name for source, name in required if source == tag}
-    require(set(current) <= expected_names, 'Unexpected object-release assets; manual review needed')
+    expected_names = {name: expected for (source, name), expected in required.items() if source == tag}
+    require(all(name in expected_names or incomplete_asset(item, expected_names) for name, item in current.items()),
+            'Unexpected object-release assets; manual review needed')
     # Validate all old dependencies BEFORE uploading or publishing anything.
     previous = {}
     for (source, name), expected in required.items():
@@ -134,13 +135,11 @@ def run(api, value, required, objects, metadata, object_release_id, app_release_
     def ensure(release, assets):
         existing = asset_map(api, release)
         for asset in assets:
-            if asset['name'] in existing:
+            if asset['name'] in existing and existing[asset['name']].get('state') == 'uploaded':
                 check_remote(existing[asset['name']], asset)
             elif upload:
-                fresh = api.json('GET', f'{API}/releases/{release["id"]}')
-                require(fresh.get('draft') is True, 'Upload target was published while preparing the update')
                 print('Uploading verified asset ' + asset['name'], flush=True)
-                remote = api.upload(fresh, asset); check_remote(remote, asset)
+                remote = upload_verified(api, release, asset, known_asset=existing.get(asset['name'])); check_remote(remote, asset)
                 # Keep first-time bootstrap uploads below mutation rate limits.
                 time.sleep(1.1)
             else:

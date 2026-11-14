@@ -20,7 +20,7 @@ import tarfile
 import time
 from urllib.parse import urlsplit
 
-from release_uploader import CHUNK, GitHub, ReleaseError, require
+from github_release_store import CHUNK, GitHub, ReleaseError, require, upload_verified, incomplete_asset
 from release_config import (CONFIG, API, REPO, VERSION, TAG, SOURCE, IMAGE, MANUAL,
                             PATCH, INPUT, REPORT, EXPECTED_CDHASH, EXPECTED_ENTRIES,
                             PATCH_COUNT, BASE, BASE_CDHASH, BASE_IMAGE_HASH,
@@ -344,7 +344,7 @@ def upload_outputs(api, release_id, output, manifest):
             check_asset(existing[name], asset["size"], asset["sha256"])
         else:
             print(f"Uploading verified draft asset {name}", flush=True)
-            uploaded = api.upload(release, asset)
+            uploaded = upload_verified(api, release, asset, known_asset=None)
             check_asset(uploaded, asset["size"], asset["sha256"])
     final = asset_map(api, draft(api, release_id))
     for name in allowed:
@@ -373,25 +373,24 @@ def prepare_file_snapshot(api, inputs, volume, work):
             "body": "Immutable files used automatically by the signed launcher updater. Use the main launcher release for installation. Do not delete referenced update files.",
             "draft": True, "prerelease": True, "make_latest": "false"})
     existing = asset_map(api, objects)
-    require(set(existing) <= {a["name"] for a in plan["newObjects"]}, "Unexpected content draft assets")
+    expected_objects = {a["name"]: a for a in plan["newObjects"]}
+    require(all(name in expected_objects or incomplete_asset(item, expected_objects) for name, item in existing.items()), "Unexpected content draft assets")
     for index, item in enumerate(plan["newObjects"], 1):
         path = destination / "objects" / item["name"]
         require(path.is_file() and not path.is_symlink() and path.stat().st_size == item["size"] and sha(path) == item["sha256"], "Prepared content object mismatch")
-        if item["name"] in existing:
+        if item["name"] in existing and existing[item["name"]].get("state") == "uploaded":
             check_asset(existing[item["name"]], item["size"], item["sha256"])
         else:
-            current = api.json("GET", f"{API}/releases/{objects['id']}")
-            require(current.get("draft") is True, "Content release was published during upload")
             st = path.stat()
-            uploaded = api.upload(current, {**item, "path": path, "stamp": (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)})
+            uploaded = upload_verified(api, objects, {**item, "path": path, "stamp": (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)}, known_asset=existing.get(item["name"]))
             check_asset(uploaded, item["size"], item["sha256"])
             time.sleep(1.1)
         print(f"Verified immutable update object {index}/{len(plan['newObjects'])}", flush=True)
         path.unlink()  # Generated runner temporary only; uploaded object remains in draft.
     final = asset_map(api, objects)
-    require(set(final) == {a["name"] for a in plan["newObjects"]}, "Content object count mismatch")
+    require(set(expected_objects) <= set(final) and all(name in expected_objects or incomplete_asset(item, expected_objects) for name, item in final.items()), "Content object count mismatch")
     for item in plan["newObjects"]: check_asset(final[item["name"]], item["size"], item["sha256"])
-    return destination, objects["id"], len(final)
+    return destination, objects["id"], len(expected_objects)
 
 
 def remote_run(args):
@@ -407,7 +406,12 @@ def remote_run(args):
     check_asset(input_asset, input_asset["size"], args.input_sha256)
     require(0 < input_asset["size"] < 256 * 1024 * 1024, "Unexpected CI input size")
     # A rerun must never replace a previous run's nondeterministic DMG bytes.
-    require(set(assets) == {INPUT, SOURCE}, "Draft must contain only reviewed preparation inputs")
+    superseded = {
+        "GeneralsX-1.0.6.3-ci-input-superseded.tar.gz": (352508, "75e7e6e4021a8528f056092625e358eff42ffa460769bba0f03c9e04bf6d7e0f"),
+        "GeneralsX-1.0.6.3-source-superseded.tar.gz": (15281119, "147e265b91ba7dbd7649df46b6339766cd50f5585a8999c1ee366c5a9c8c1884"),
+    }
+    require(set(assets) in ({INPUT, SOURCE}, {INPUT, SOURCE} | set(superseded)), "Draft may contain only pinned preparation inputs")
+    for name in set(assets) & set(superseded): check_asset(assets[name], *superseded[name])
     args.work.mkdir()
     archive = args.work / INPUT
     with archive.open("xb") as stream:
