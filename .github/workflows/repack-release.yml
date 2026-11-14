@@ -95,37 +95,3 @@ jobs:
           subprocess.run([sys.executable, "ci/finalize_file_release.py", "--config", "ci/release-config.json",
               "--build-commit", os.environ["BUILD_COMMIT"], "--build-run", os.environ["BUILD_RUN"]], check=True)
           PYTHON
-
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          INPUT_SHA256: ${{ inputs.input_sha256 }}
-        run: |
-          python3 - <<'PY'
-          import os, re, subprocess, sys
-          sys.path.insert(0, "ci")
-          from release_uploader import GitHub, require
-          from release_config import API, TAG, INPUT
-          digest = os.environ["INPUT_SHA256"]
-          require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "Input SHA256 required")
-          api = GitHub(os.environ["GITHUB_TOKEN"])
-          releases = [r for r in api.pages(API + "/releases") if r.get("tag_name") == TAG]
-          require(len(releases) == 1, "Exact release required")
-          release = releases[0]
-          remote_assets = api.assets(release)
-          assets = [a for a in remote_assets if a.get("name") == INPUT]
-          require(len(assets) == 1 and assets[0].get("digest") == "sha256:" + digest, "Pinned input asset required")
-          if release.get("draft") is not True:
-              # Recover only this accidentally published, incomplete prerelease.
-              require(release.get("prerelease") is True, "Published production releases cannot be modified")
-              allowed = {INPUT, "GeneralsX-1.0.6.2-source.tar.gz",
-                  "GeneralsX-1.0.6.2-ci-input-superseded.tar.gz",
-                  "GeneralsX-1.0.6.2-source-superseded.tar.gz"}
-              require({a["name"] for a in remote_assets} == allowed, "Recovery requires only the four reviewed preparation archives")
-              release = api.json("PATCH", API + "/releases/" + str(release["id"]),
-                  {"draft": True, "prerelease": False, "make_latest": "false"})
-          require(release.get("draft") is True and not release.get("prerelease"), "Unpublished draft required")
-          subprocess.run([sys.executable, "ci/repack_release.py", "--work",
-              os.path.join(os.environ["RUNNER_TEMP"], "generalsx-repack-1.0.6.2"),
-              "--release-id", str(release["id"]), "--input-asset-id", str(assets[0]["id"]),
-              "--input-sha256", digest], check=True)
-          PY
