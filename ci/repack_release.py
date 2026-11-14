@@ -364,7 +364,13 @@ def remote_run(args):
     check_asset(input_asset, input_asset["size"], args.input_sha256)
     require(0 < input_asset["size"] < 256 * 1024 * 1024, "Unexpected CI input size")
     # A rerun must never replace a previous run's nondeterministic DMG bytes.
-    require(set(assets) == {INPUT, SOURCE}, "Draft must contain only the verified input and source; existing outputs require manual review")
+    superseded = {
+        'GeneralsX-1.0.6.2-ci-input-superseded.tar.gz': (61813787, 'c4a1c637000160a00ee660c7347c6e8afc1f5b02803f35bddc40cfcd5efa7b0f'),
+        'GeneralsX-1.0.6.2-source-superseded.tar.gz': (15151046, '496a2cae3d1078cb961506e9b89d4dcc52959d422f6dba5c0a80f6daa567709a'),
+    }
+    require(set(assets) in ({INPUT, SOURCE}, {INPUT, SOURCE} | set(superseded)), "Draft may contain only reviewed preparation archives; existing outputs require manual review")
+    for name in set(assets) & set(superseded):
+        check_asset(assets[name], *superseded[name])
     args.work.mkdir()
     archive = args.work / INPUT
     with archive.open("xb") as stream:
