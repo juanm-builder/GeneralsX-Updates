@@ -1,10 +1,10 @@
-name: Repack verified Generals X 1.0.6.1 draft
+name: Repack verified Generals X 1.0.6.2 draft
 
 on:
   workflow_dispatch:
     inputs:
       input_sha256:
-        description: Verified GeneralsX-1.0.6.1-ci-input.tar.gz SHA256
+        description: Verified GeneralsX-1.0.6.2-ci-input.tar.gz SHA256
         required: true
         type: string
 
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: generalsx-repack-v1.0.6.1
+  group: generalsx-repack-v1.0.6.2
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +52,7 @@ jobs:
           assets = [a for a in api.assets(release) if a.get("name") == INPUT]
           require(len(assets) == 1 and assets[0].get("digest") == "sha256:" + digest, "Pinned input asset required")
           subprocess.run([sys.executable, "ci/repack_release.py", "--work",
-              os.path.join(os.environ["RUNNER_TEMP"], "generalsx-repack-1.0.6.1"),
+              os.path.join(os.environ["RUNNER_TEMP"], "generalsx-repack-1.0.6.2"),
               "--release-id", str(release["id"]), "--input-asset-id", str(assets[0]["id"]),
               "--input-sha256", digest], check=True)
           PY
