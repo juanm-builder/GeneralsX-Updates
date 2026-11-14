@@ -1,39 +1,101 @@
-name: Repack verified Generals X 1.0.6.2 draft
+name: Generals X 1.0.6.3 — smaller updates
 
 on:
   workflow_dispatch:
     inputs:
-      input_sha256:
-        description: Verified GeneralsX-1.0.6.2-ci-input.tar.gz SHA256
+      operation:
+        description: Build drafts, or publish after locally signed manifests are uploaded
         required: true
+        type: choice
+        options: [build, publish]
+      input_sha256:
+        description: Verified GeneralsX-1.0.6.3-ci-input.tar.gz SHA256
+        required: true
+        type: string
+      build_commit:
+        description: Expected successful build commit (publish only)
+        required: false
+        type: string
+      build_run:
+        description: Expected successful build run ID (publish only)
+        required: false
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: generalsx-repack-v1.0.6.2
+  group: generalsx-release-v1.0.6.3
   cancel-in-progress: false
 
 jobs:
-  repack:
-    if: github.repository == 'juanm-builder/GeneralsX-Updates'
+  build:
+    if: github.repository == 'juanm-builder/GeneralsX-Updates' && inputs.operation == 'build'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
       - name: Check out reviewed release scripts
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Ensure build-only XZ compressor
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
-          if ! command -v xz >/dev/null 2>&1; then
-            brew install xz
-          fi
+          if ! command -v xz >/dev/null 2>&1; then brew install xz; fi
           xz --version
-      - name: Reconstruct and verify installer; upload to draft only
+      - name: Reconstruct bridge and verify immutable files; upload drafts only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_SHA256: ${{ inputs.input_sha256 }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re, subprocess, sys
+          sys.path.insert(0, "ci")
+          from release_uploader import GitHub, require
+          from release_config import API, TAG, INPUT, CONFIG
+          digest = os.environ["INPUT_SHA256"]
+          require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None and digest == CONFIG["inputSHA256"], "Pinned input SHA256 required")
+          api = GitHub(os.environ["GITHUB_TOKEN"])
+          matches = [r for r in api.pages(API + "/releases") if r.get("tag_name") == TAG]
+          require(len(matches) == 1 and matches[0].get("draft") is True, "Exact unpublished app draft required")
+          assets = [a for a in api.assets(matches[0]) if a.get("name") == INPUT]
+          require(len(assets) == 1 and assets[0].get("digest") == "sha256:" + digest, "Pinned draft input required")
+          subprocess.run([sys.executable, "ci/repack_release.py", "--work",
+              os.path.join(os.environ["RUNNER_TEMP"], "generalsx-bridge-1.0.6.3"),
+              "--release-id", str(matches[0]["id"]), "--input-asset-id", str(assets[0]["id"]),
+              "--input-sha256", digest], check=True)
+          PYTHON
+  publish:
+    if: github.repository == 'juanm-builder/GeneralsX-Updates' && inputs.operation == 'publish'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out reviewed finalizer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify local signatures, provenance, all objects and bridge; publish last
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_SHA256: ${{ inputs.input_sha256 }}
+          BUILD_COMMIT: ${{ inputs.build_commit }}
+          BUILD_RUN: ${{ inputs.build_run }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, pathlib, re, shutil, subprocess, sys
+          sys.path.insert(0, "ci")
+          from release_config import CONFIG
+          from github_release_store import require
+          require(os.environ["INPUT_SHA256"] == CONFIG["inputSHA256"], "Pinned release input required")
+          require(re.fullmatch(r"[0-9a-f]{40}", os.environ["BUILD_COMMIT"]) is not None, "Expected build commit required")
+          require(re.fullmatch(r"[0-9]+", os.environ["BUILD_RUN"]) is not None, "Expected build run required")
+          pathlib.Path("tools").mkdir(exist_ok=True)
+          shutil.copyfile("ci/SignSuiteUpdate.swift", "tools/SignSuiteUpdate.swift")
+          subprocess.run([sys.executable, "ci/finalize_file_release.py", "--config", "ci/release-config.json",
+              "--build-commit", os.environ["BUILD_COMMIT"], "--build-run", os.environ["BUILD_RUN"]], check=True)
+          PYTHON
+
         env:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_SHA256: ${{ inputs.input_sha256 }}
