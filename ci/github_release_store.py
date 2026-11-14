@@ -13,6 +13,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import tempfile
+import time
 from urllib.parse import urlencode,urlsplit
 REPO = "juanm-builder/GeneralsX-Updates"
 API = "https://api.github.com/repos/" + REPO
@@ -25,9 +26,14 @@ class ReleaseError(Exception):
     pass
 
 class HTTPFailure(ReleaseError):
-    def __init__(self, status):
+    def __init__(self, status, retryable=False, retry_after=0):
         self.status = status
+        self.retryable = retryable or status in {408, 429, 500, 502, 503, 504}
+        self.retry_after = min(30, max(0, retry_after))
         super().__init__(f"GitHub request returned HTTP {status}; response body withheld.")
+
+class TransportFailure(ReleaseError):
+    pass
 
 def require(condition, message):
     if not condition:
@@ -87,6 +93,8 @@ class GitHub:
             elif body is not None:
                 connection.send(body)
             response = connection.getresponse()
+            retry_header = response.getheader("Retry-After", "")
+            self._retry_after = min(30, int(retry_header)) if retry_header.isdecimal() else 0
             status = response.status
             location = response.getheader("Location")
             limit = SMALL_LIMIT if binary else 8 * SMALL_LIMIT
@@ -95,17 +103,29 @@ class GitHub:
             return status, location, data
         except ReleaseError:
             raise
-        except Exception:
+        except Exception as error:
             # Never include request headers, credentials, signed URLs, or server bodies.
-            raise ReleaseError("GitHub transport failed; remote state may have changed. Re-run verification or upload to reconcile safely.") from None
+            raise TransportFailure(f"GitHub transport failed ({type(error).__name__}); remote state must be reconciled before retry.") from None
         finally:
             connection.close()
 
     def json(self, method, url, payload=None):
-        status, _, data = self.request(method, url, payload=payload)
-        if not 200 <= status < 300:
-            raise HTTPFailure(status)
-        return json.loads(data)
+        for attempt in range(4):
+            try:
+                status, _, data = self.request(method, url, payload=payload)
+                if not 200 <= status < 300:
+                    raise self.http_failure(status, data)
+                try: return json.loads(data)
+                except (ValueError, UnicodeError): raise ReleaseError("GitHub returned invalid metadata; response body withheld.") from None
+            except (TransportFailure, HTTPFailure) as error:
+                if method != "GET" or attempt == 3 or (isinstance(error, HTTPFailure) and not error.retryable): raise
+                time.sleep(max(2 ** attempt, getattr(error, 'retry_after', 0)))
+
+    def http_failure(self, status, data):
+        try: message = json.loads(data).get('message', '').lower()
+        except (ValueError, AttributeError, UnicodeError): message = ''
+        limited = status == 403 and ('rate limit' in message or 'abuse' in message)
+        return HTTPFailure(status, retryable=limited, retry_after=getattr(self, '_retry_after', 0))
 
     def pages(self, url):
         result = []
@@ -126,7 +146,7 @@ class GitHub:
         require(endpoint.hostname == "uploads.github.com" and endpoint.path == f"/repos/{REPO}/releases/{release['id']}/assets" and not endpoint.query, "Unexpected upload endpoint")
         status, _, data = self.request("POST", base + "?" + urlencode({"name": asset["name"]}), asset=asset)
         if status != 201:
-            raise HTTPFailure(status)
+            raise self.http_failure(status, data)
         return json.loads(data)
 
     def download_small(self, remote):
@@ -147,3 +167,60 @@ def write_report(path, payload):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n")
     temporary.replace(path)
+
+
+def incomplete_asset(asset, expected_names):
+    """Only a named, preserved partial transfer created by this uploader."""
+    if type(asset.get('id')) is not int or asset['id'] <= 0: return False
+    suffix = '.incomplete-' + str(asset['id'])
+    name = asset.get('name', '')
+    original = name[:-len(suffix)] if name.endswith(suffix) else ''
+    if asset.get('label') != 'Incomplete uploader transfer; not used' or original not in expected_names: return False
+    if asset.get('state') == 'starter' and asset.get('size') == 0: return True
+    expected = expected_names.get(original) if isinstance(expected_names, dict) else None
+    return bool(expected and asset.get('state') == 'uploaded' and asset.get('size') == expected['size'] and
+                asset.get('digest') == 'sha256:' + expected['sha256'])
+
+_UNKNOWN_ASSET = object()
+
+
+def upload_verified(api, release, asset, attempts=4, known_asset=_UNKNOWN_ASSET):
+    """Reconcile lost upload responses; never overwrite or delete existing bytes.
+
+    A GitHub `starter` placeholder is retained under an explicitly labelled name
+    before retrying. Completed uploads are accepted only with the exact digest.
+    """
+    def matches(remote):
+        require(remote.get('state') == 'uploaded' and remote.get('size') == asset['size'] and
+                remote.get('digest') == 'sha256:' + asset['sha256'], 'Existing/uploaded asset checksum mismatch; nothing overwritten')
+        return remote
+    def find(current):
+        candidates = [a for a in api.assets(current) if a.get('name') == asset['name']]
+        require(len(candidates) <= 1, 'Duplicate asset names')
+        return candidates[0] if candidates else None
+    for attempt in range(attempts):
+        try:
+            current = api.json('GET', f'{API}/releases/{release["id"]}')
+            require(current.get('tag_name') == release.get('tag_name'), 'Upload release identity changed')
+            existing = known_asset if attempt == 0 and known_asset is not _UNKNOWN_ASSET else find(current)
+            if existing and existing.get('state') == 'uploaded': return matches(existing)
+            require(current.get('draft') is True, 'New uploads require an unpublished draft')
+            if existing:
+                require(existing.get('state') == 'starter' and type(existing.get('id')) is int,
+                        'Conflicting asset state; manual review needed')
+                # Renaming is reversible and preserves any received bytes.
+                api.json('PATCH', f'{API}/releases/assets/{existing["id"]}',
+                    {'name': asset['name'] + '.incomplete-' + str(existing['id']),
+                     'label': 'Incomplete uploader transfer; not used'})
+            return matches(api.upload(current, asset))
+        except (TransportFailure, HTTPFailure) as error:
+            retryable = isinstance(error, TransportFailure) or error.retryable or error.status == 422
+            if not retryable: raise
+            # The server may have committed all bytes before the response was lost.
+            try:
+                recovered = find(release)
+                if recovered and recovered.get('state') == 'uploaded': return matches(recovered)
+            except (TransportFailure, HTTPFailure): pass
+            if attempt == attempts - 1: raise
+            print(f'Reconciling interrupted upload, retry {attempt + 1}/{attempts - 1}', flush=True)
+            time.sleep(max(2 ** attempt, getattr(error, 'retry_after', 0)))
