@@ -1,45 +1,53 @@
 {
   "repository": "juanm-builder/GeneralsX-Updates",
-  "version": "1.0.6.2",
-  "sequence": 2026111401,
-  "bundleVersion": "20261114.1",
-  "expectedAppCDHash": "62184d1987ae81b58490e89cfdcd92a08085b47e",
+  "version": "1.0.6.3",
+  "sequence": 2026111402,
+  "bundleVersion": "20261114.2",
+  "expectedAppCDHash": "a1bafe364c7cc478e1f323d76308ad88cc186c7f",
   "expectedTreeEntries": 630,
-  "patchFiles": 28,
+  "patchFiles": 4,
   "dmgFormat": "UDZO",
   "manualInstaller": "required",
   "publicKeySHA256": "961eb7955c499b793b9845e5ce72e58fba5357d4a09b9eedf585326d8960a3c1",
   "baseline": {
     "schema": 1,
-    "sequence": 2026110605,
-    "version": "1.0.5.11",
-    "bundleVersion": "20261106.5",
+    "sequence": 2026111401,
+    "version": "1.0.6.2",
+    "bundleVersion": "20261114.1",
     "bundleIdentifier": "local.generalsx.portable.launcher",
     "minimumSystemVersion": "11.0",
     "architecture": "arm64",
     "appName": "Generals X Launcher.app",
-    "appCDHash": "11cf64c018721b4b9ad0b4c8f555fdddb40ba543",
-    "imageSize": 2606069765,
-    "imageSHA256": "408363b5fd26f2934488ca54226382cf645cd38f7eb092515106596c27826aee",
-    "expandedSize": 5237307092,
+    "appCDHash": "62184d1987ae81b58490e89cfdcd92a08085b47e",
+    "imageSize": 2606074076,
+    "imageSHA256": "222aeac7dda13abd28c19280efb10e8508535d9a87feb300d6fdd79b4badbc80",
+    "expandedSize": 5237440908,
     "parts": [
       {
-        "name": "GeneralsX-1.0.5.11-macos-arm64.dmg.part01",
+        "name": "GeneralsX-1.0.6.2-macos-arm64.dmg.part01",
         "size": 1073741824,
-        "sha256": "097136f53afcb8c2bfb64725ff0c8b660b39607404c398aff69fafa1f61b4ccf"
+        "sha256": "e33433a85bbaf18d04a771f62b4a1c17e15cb313f34bca0a32f7d5fdaa68326b"
       },
       {
-        "name": "GeneralsX-1.0.5.11-macos-arm64.dmg.part02",
+        "name": "GeneralsX-1.0.6.2-macos-arm64.dmg.part02",
         "size": 1073741824,
-        "sha256": "a6779c8b6034a0d39a3f8b7b91c5ce7ea424428b42ecbd1f2530dcffde215dff"
+        "sha256": "de991fa8f1ad74da695864f6cb4a6e941b60be1a30ee7cd0dd8cdb74e61ddfe1"
       },
       {
-        "name": "GeneralsX-1.0.5.11-macos-arm64.dmg.part03",
-        "size": 458586117,
-        "sha256": "38493e8700cea5d3e393c2d52c0f4e0b7b492359bff925298751fb5724a5676c"
+        "name": "GeneralsX-1.0.6.2-macos-arm64.dmg.part03",
+        "size": 458590428,
+        "sha256": "262c6dff2c8b9447a7f92ec6d640a7468e3e67258c0b2360a1802b25a15ac583"
       }
     ]
   },
   "manualFormat": "tar.xz",
-  "manualCompression": "xz-threaded-9"
+  "manualCompression": "xz-threaded-9",
+  "publicKey": "lrU7fhwq7fwTg5/Tk3llxhHDq+EMac2SV7ZLcplV+gc=",
+  "fileUpdateToolSHA256": "1cb80dd6d8e89820d7b7c1c9288ade3cb2073f949a3e40afb339f1405917ac29",
+  "inputSHA256": "75e7e6e4021a8528f056092625e358eff42ffa460769bba0f03c9e04bf6d7e0f",
+  "source": {
+    "name": "GeneralsX-1.0.6.3-source.tar.gz",
+    "size": 15281119,
+    "sha256": "147e265b91ba7dbd7649df46b6339766cd50f5585a8999c1ee366c5a9c8c1884"
+  }
 }

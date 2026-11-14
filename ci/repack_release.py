@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Repack the exact already-signed .12 app from verified .11 plus a pinned patch.
+"""Build the exact signed1.0.6.3 bridge from verified1.0.6.2 and a pinned patch.
 
-Never signs, creates/deletes releases, replaces assets, or publishes. The only
-remote writes are explicit uploads of verified output files to the target draft.
+Never signs, deletes/releases assets, replaces uploaded bytes, or publishes.
+May create the scoped content draft and upload verified bytes to both drafts.
 Uses release_uploader.py's streaming client, not its CLI or credential helper.
 """
 import argparse
@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import time
 from urllib.parse import urlsplit
 
 from release_uploader import CHUNK, GitHub, ReleaseError, require
@@ -330,7 +331,7 @@ def split_and_manifest(image, inputs, output, manual_path=None, manual=None):
 
 def upload_outputs(api, release_id, output, manifest):
     part_names = [p["name"] for p in manifest["parts"]]
-    names = part_names + ([MANUAL] if (output / MANUAL).exists() else []) + ["suite-update.json", "SHA256SUMS.txt", REPORT]
+    names = part_names + ([MANUAL] if (output / MANUAL).exists() else []) + ["suite-update.json", "suite-files.json", "file-upload-plan.json", "SHA256SUMS.txt", REPORT]
     allowed = set(names)
     require({p.name for p in output.iterdir()} == allowed, "Unexpected generated upload files")
     for name in names:
@@ -351,6 +352,48 @@ def upload_outputs(api, release_id, output, manifest):
     print(f"PASS: {len(names)} verified output assets uploaded; release remains DRAFT; manifest remains UNSIGNED", flush=True)
 
 
+def prepare_file_snapshot(api, inputs, volume, work):
+    # This code is committed with a pinned digest; no private key enters CI.
+    tool = Path(__file__).with_name("prepare_file_update.py")
+    require(sha(tool) == CONFIG["fileUpdateToolSHA256"], "File-update tool pin mismatch")
+    destination = work / "file-snapshot"
+    subprocess.run([__import__("sys").executable, str(tool), "--app", str(volume / APP),
+        "--output", str(destination), "--object-tag", "files-v" + VERSION], check=True)
+    snapshot = read_json(destination / "suite-files.json")
+    require(snapshot["appCDHash"] == EXPECTED_CDHASH and snapshot["sequence"] == CONFIG["sequence"], "File snapshot app identity mismatch")
+    plan = read_json(destination / "upload-plan.json")
+    matches = [r for r in api.pages(API + "/releases") if r.get("tag_name") == "files-v" + VERSION]
+    require(len(matches) <= 1, "Duplicate content release")
+    if matches:
+        objects = matches[0]
+        require(objects.get("draft") is True, "Content target must remain a draft")
+    else:
+        objects = api.json("POST", API + "/releases", {"tag_name": "files-v" + VERSION,
+            "name": "Generals X " + VERSION + " update files — keep for repair and future updates",
+            "body": "Immutable files used automatically by the signed launcher updater. Use the main launcher release for installation. Do not delete referenced update files.",
+            "draft": True, "prerelease": True, "make_latest": "false"})
+    existing = asset_map(api, objects)
+    require(set(existing) <= {a["name"] for a in plan["newObjects"]}, "Unexpected content draft assets")
+    for index, item in enumerate(plan["newObjects"], 1):
+        path = destination / "objects" / item["name"]
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == item["size"] and sha(path) == item["sha256"], "Prepared content object mismatch")
+        if item["name"] in existing:
+            check_asset(existing[item["name"]], item["size"], item["sha256"])
+        else:
+            current = api.json("GET", f"{API}/releases/{objects['id']}")
+            require(current.get("draft") is True, "Content release was published during upload")
+            st = path.stat()
+            uploaded = api.upload(current, {**item, "path": path, "stamp": (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)})
+            check_asset(uploaded, item["size"], item["sha256"])
+            time.sleep(1.1)
+        print(f"Verified immutable update object {index}/{len(plan['newObjects'])}", flush=True)
+        path.unlink()  # Generated runner temporary only; uploaded object remains in draft.
+    final = asset_map(api, objects)
+    require(set(final) == {a["name"] for a in plan["newObjects"]}, "Content object count mismatch")
+    for item in plan["newObjects"]: check_asset(final[item["name"]], item["size"], item["sha256"])
+    return destination, objects["id"], len(final)
+
+
 def remote_run(args):
     require(os.environ.get("GITHUB_REPOSITORY") == REPO and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Remote mode requires this repository's manually dispatched workflow")
     require(re.fullmatch(r"[0-9a-f]{64}", args.input_sha256 or "") is not None, "Input SHA256 is required")
@@ -364,13 +407,7 @@ def remote_run(args):
     check_asset(input_asset, input_asset["size"], args.input_sha256)
     require(0 < input_asset["size"] < 256 * 1024 * 1024, "Unexpected CI input size")
     # A rerun must never replace a previous run's nondeterministic DMG bytes.
-    superseded = {
-        'GeneralsX-1.0.6.2-ci-input-superseded.tar.gz': (61813787, 'c4a1c637000160a00ee660c7347c6e8afc1f5b02803f35bddc40cfcd5efa7b0f'),
-        'GeneralsX-1.0.6.2-source-superseded.tar.gz': (15151046, '496a2cae3d1078cb961506e9b89d4dcc52959d422f6dba5c0a80f6daa567709a'),
-    }
-    require(set(assets) in ({INPUT, SOURCE}, {INPUT, SOURCE} | set(superseded)), "Draft may contain only reviewed preparation archives; existing outputs require manual review")
-    for name in set(assets) & set(superseded):
-        check_asset(assets[name], *superseded[name])
+    require(set(assets) == {INPUT, SOURCE}, "Draft must contain only reviewed preparation inputs")
     args.work.mkdir()
     archive = args.work / INPUT
     with archive.open("xb") as stream:
@@ -414,12 +451,17 @@ def remote_run(args):
         mounted_count = verify_volume(new_mount, inputs, expected)
     finally:
         detach(new_mount)
+    file_snapshot, object_release_id, object_count = prepare_file_snapshot(api, inputs, volume, args.work)
     manual_path = create_manual(volume, image, args.work)
     shutil.rmtree(volume)
     manual = verify_manual(manual_path, args.work, inputs, expected)
     output = args.work / "output"
     manifest = split_and_manifest(image, inputs, output, manual_path, manual)
     report = {"schema": 1, "repository": REPO, "tag": TAG, "releaseId": args.release_id, "inputArchiveSHA256": args.input_sha256, "baselineImageSHA256": BASE_IMAGE_HASH, "appCDHash": EXPECTED_CDHASH, "expectedTreeSHA256": sha(inputs / "expected-tree.json"), "treeEntriesVerified": count, "mountedTreeEntriesVerified": mounted_count, "hardlinkGroupsVerified": len(expected["hardlinks"]), "exactContentTypesModesSymlinks": True, "strictDeepCodeSignatureVerified": True, "imageSHA256": manifest["imageSHA256"], "imageSize": manifest["imageSize"], "manifestSHA256": sha(output / "suite-update.json"), "workflowCommit": os.environ.get("GITHUB_SHA"), "workflowRunId": os.environ.get("GITHUB_RUN_ID"), "privateSigningKeyUsed": False, "manifestSigned": False, "published": False, "dmgFormat": CONFIG["dmgFormat"], "manualInstallerAvailable": manual is not None, "manualInstaller": manual, "releaseConfigSHA256": sha(Path(__file__).with_name("release-config.json"))}
+    shutil.copyfile(file_snapshot / "suite-files.json", output / "suite-files.json")
+    shutil.copyfile(file_snapshot / "upload-plan.json", output / "file-upload-plan.json")
+    report.update(fileSnapshotSHA256=sha(output / "suite-files.json"), objectReleaseId=object_release_id,
+        objectAssetsVerified=True, objectCount=object_count, fileUpdateToolSHA256=CONFIG["fileUpdateToolSHA256"])
     write_json(output / REPORT, report)
     upload_outputs(api, args.release_id, output, manifest)
     print(json.dumps(report, indent=2), flush=True)

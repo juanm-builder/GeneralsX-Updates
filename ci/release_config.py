@@ -6,7 +6,7 @@ import re
 CONFIG = json.loads(Path(__file__).with_name("release-config.json").read_text())
 REPO = CONFIG["repository"]
 VERSION = CONFIG["version"]
-if REPO != "juanm-builder/GeneralsX-Updates" or VERSION != "1.0.6.2":
+if REPO != "juanm-builder/GeneralsX-Updates" or VERSION != "1.0.6.3":
     raise ValueError("Release configuration is outside this reviewed release scope")
 if re.fullmatch(r"[0-9a-f]{40}", CONFIG["expectedAppCDHash"]) is None:
     raise ValueError("Pin the staged app CDHash before using release helpers")
@@ -18,7 +18,7 @@ if CONFIG["manualFormat"] not in {"dmg", "tar.xz"}:
     raise ValueError("Unreviewed manual archive format")
 if CONFIG["manualCompression"] != "xz-threaded-9":
     raise ValueError("Unreviewed manual archive producer")
-if CONFIG["baseline"]["version"] != "1.0.5.11":
+if CONFIG["baseline"]["version"] != "1.0.6.2":
     raise ValueError("Unexpected public baseline version")
 TAG = "v" + VERSION
 API = "https://api.github.com/repos/" + REPO
