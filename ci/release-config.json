@@ -1,9 +1,9 @@
 {
   "repository": "juanm-builder/GeneralsX-Updates",
-  "version": "1.0.6.1",
-  "sequence": 2026111301,
-  "bundleVersion": "20261113.1",
-  "expectedAppCDHash": "20042b371ad7c3e4aeb767d1fd4026e5f5f2858a",
+  "version": "1.0.6.2",
+  "sequence": 2026111401,
+  "bundleVersion": "20261114.1",
+  "expectedAppCDHash": "bc05047c1bf63a925147e0b2f445ed760d5033e5",
   "expectedTreeEntries": 630,
   "patchFiles": 28,
   "dmgFormat": "UDZO",
